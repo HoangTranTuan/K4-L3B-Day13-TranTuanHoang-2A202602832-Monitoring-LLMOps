@@ -5,6 +5,13 @@ import time
 from dataclasses import dataclass
 
 from .incidents import STATE
+from .tracing import get_langfuse_client, observe, tracing_enabled
+
+
+def _estimate_cost(tokens_in: int, tokens_out: int) -> float:
+    input_cost = (tokens_in / 1_000_000) * 3
+    output_cost = (tokens_out / 1_000_000) * 15
+    return round(input_cost + output_cost, 6)
 
 
 @dataclass
@@ -25,6 +32,7 @@ class FakeLLM:
     def __init__(self, model: str = "claude-sonnet-4-5") -> None:
         self.model = model
 
+    @observe(name="generation", as_type="generation", capture_input=False, capture_output=False)
     def generate(self, prompt: str) -> FakeResponse:
         started = time.perf_counter()
         time.sleep(0.05)  # mô phỏng thời điểm token đầu tiên sẵn sàng
@@ -38,6 +46,30 @@ class FakeLLM:
             "Starter answer. You should improve this output logic and add better quality checks. "
             "Use retrieved context and keep responses concise."
         )
+        cost_usd = _estimate_cost(input_tokens, output_tokens)
+
+        if tracing_enabled():
+            try:
+                client = get_langfuse_client()
+                if hasattr(client, "update_current_generation") and callable(client.update_current_generation):
+                    client.update_current_generation(
+                        model=self.model,
+                        usage={
+                            "input": input_tokens,
+                            "output": output_tokens,
+                            "total": input_tokens + output_tokens,
+                        },
+                        cost_details={
+                            "total": cost_usd,
+                        },
+                        metadata={
+                            "cost_usd": cost_usd,
+                            "ttft_ms": ttft_ms,
+                        },
+                    )
+            except Exception:
+                pass
+
         return FakeResponse(
             text=answer,
             usage=FakeUsage(input_tokens, output_tokens),
